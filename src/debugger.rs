@@ -28,36 +28,69 @@ impl Debugger {
         }
     }
 
+    pub fn cont_inferior(&mut self) {
+        // run the inferior.
+        let res = self.inferior.as_mut().unwrap().cont();
+        let pid = self.inferior.as_ref().unwrap().pid();
+        match res {
+            Ok(Status::Stopped(signal, _)) => {
+                println!("Child stopped (signal {:?})", signal);
+            }
+            Ok(Status::Exited(_)) => {
+                drop(self.inferior.as_mut().unwrap());
+                self.inferior = None;
+                println!("Child exited (status 0)");
+            }
+            _ => {
+                println!("process {} encounters error on cont", pid);
+            }
+        }
+    }
+
+    // FIXME: capture the error.
+    pub fn kill_inferior(&mut self) {
+        println!(
+            "killing running inferior (pid {})",
+            self.inferior.as_ref().unwrap().pid()
+        );
+
+        if let Err(_) = self.inferior.as_mut().unwrap().kill() {
+            println!("Error kill");
+            return;
+        }
+        drop(self.inferior.as_mut().unwrap());
+        self.inferior = None;
+    }
+
     pub fn run(&mut self) {
         loop {
             match self.get_next_command() {
                 DebuggerCommand::Run(args) => {
-                    if let Some(inferior) = Inferior::new(&self.target, &args) {
-                        // Create the inferior
-                        // the inferior is initially at the stopped state because of SIGTRAP.
-                        self.inferior = Some(inferior);
+                    if self.inferior.is_some() {
+                        self.kill_inferior();
+                    }
 
-                        // run the inferior.
-                        let res = self.inferior.as_mut().unwrap().cont();
-                        let pid = self.inferior.as_ref().unwrap().pid();
-                        match res {
-                            Ok(Status::Stopped(_, _)) => {
-                                println!("Child exited (status 0)");
-                                println!("process {} stopped", pid);
-                            }
-                            Ok(Status::Exited(_)) => {
-                                println!("Child exited (status 0)");
-                                println!("process {} terminated", pid);
-                            }
-                            _ => {
-                                println!("process {} encounters error on cont", pid);
-                            }
-                        }
+                    // create a new inferior.
+                    // the inferior is initially at the stopped state because of SIGTRAP.
+                    if let Some(inferior) = Inferior::new(&self.target, &args) {
+                        self.inferior = Some(inferior);
+                        // continue running the inferior.
+                        self.cont_inferior();
                     } else {
                         println!("Error starting subprocess");
                     }
                 }
+                DebuggerCommand::Cont => {
+                    if self.inferior.is_none() {
+                        println!("Error no inferior");
+                        return;
+                    }
+                    self.cont_inferior();
+                }
                 DebuggerCommand::Quit => {
+                    if self.inferior.is_some() {
+                        self.kill_inferior();
+                    }
                     return;
                 }
             }

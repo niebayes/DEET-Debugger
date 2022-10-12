@@ -85,6 +85,14 @@ impl Inferior {
         self.wait(None)
     }
 
+    pub fn kill(&mut self) -> Result<Status, nix::Error> {
+        // kill the child process and then reap it.
+        if let Ok(_) = self.child.kill() {
+            return self.wait(None);
+        }
+        Err(nix::Error::from_errno(nix::errno::Errno::EIO))
+    }
+
     /// Returns the pid of this inferior.
     pub fn pid(&self) -> Pid {
         nix::unistd::Pid::from_raw(self.child.id() as i32)
