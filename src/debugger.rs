@@ -1,6 +1,7 @@
 use crate::debugger_command::DebuggerCommand;
 use crate::dwarf_data::{DwarfData, Error as DwarfError};
 use crate::inferior::{Inferior, Status};
+use nix::sys::ptrace;
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
 
@@ -48,6 +49,20 @@ impl Debugger {
         match res {
             Ok(Status::Stopped(signal, _)) => {
                 println!("Child stopped (signal {:?})", signal);
+
+                if let Ok(regs) = ptrace::getregs(pid) {
+                    // print current stack frame.
+                    let line = self.debug_data.get_line_from_addr(regs.rip as usize);
+                    let func_name = self.debug_data.get_function_from_addr(regs.rip as usize);
+                    if line.is_some() && func_name.is_some() {
+                        println!(
+                            "Stopped at {} ({}:{})",
+                            func_name.as_ref().unwrap(),
+                            line.as_ref().unwrap().file,
+                            line.as_ref().unwrap().number
+                        );
+                    }
+                }
             }
             Ok(Status::Exited(_)) => {
                 drop(self.inferior.as_mut().unwrap());
@@ -105,7 +120,12 @@ impl Debugger {
                         println!("Error no inferior");
                         return;
                     }
-                    if let Err(_) = self.inferior.as_ref().unwrap().print_backtrace(&self.debug_data) {
+                    if let Err(_) = self
+                        .inferior
+                        .as_ref()
+                        .unwrap()
+                        .print_backtrace(&self.debug_data)
+                    {
                         println!("Error print backtrace");
                     }
                 }
