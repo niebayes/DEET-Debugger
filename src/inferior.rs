@@ -136,9 +136,8 @@ impl Inferior {
             WaitStatus::Exited(_pid, exit_code) => Status::Exited(exit_code),
             WaitStatus::Signaled(_pid, signal, _core_dumped) => Status::Signaled(signal),
             WaitStatus::Stopped(_pid, signal) => {
-                // let regs = ptrace::getregs(self.pid())?;
-                // Status::Stopped(signal, regs.rip as usize)
-                Status::Stopped(signal, 0)
+                let regs = ptrace::getregs(self.pid())?;
+                Status::Stopped(signal, regs.rip as usize)
             }
             other => panic!("waitpid returned unexpected status: {:?}", other),
         })
