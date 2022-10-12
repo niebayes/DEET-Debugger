@@ -58,7 +58,7 @@ impl Inferior {
             .args(args)
             .spawn()
             .expect(&format!("failed to spawn {}", target));
-
+        
         let inf = Inferior { child };
         let res = inf.wait(Some(WaitPidFlag::WUNTRACED));
         // ensure the child process is paused/stopped by the SIGTRAP signal.
@@ -69,11 +69,20 @@ impl Inferior {
                 }
             }
             _ => {
+                println!("shall stopped on SIGTRAP");
                 return None;
             }
         }
 
         Some(inf)
+    }
+
+    pub fn cont(&mut self) -> Result<Status, nix::Error> {
+        if let Err(_) = ptrace::cont(self.pid(), None) {
+            // FIXME: what nix::Error to return
+            return Err(nix::Error::from_errno(nix::errno::Errno::ESRCH));
+        }
+        self.wait(None)
     }
 
     /// Returns the pid of this inferior.
