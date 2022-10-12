@@ -1,4 +1,5 @@
 use crate::debugger_command::DebuggerCommand;
+use crate::dwarf_data::{DwarfData, Error as DwarfError};
 use crate::inferior::{Inferior, Status};
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
@@ -8,12 +9,23 @@ pub struct Debugger {
     history_path: String,
     readline: Editor<()>,
     inferior: Option<Inferior>,
+    debug_data: DwarfData,
 }
 
 impl Debugger {
     /// Initializes the debugger.
     pub fn new(target: &str) -> Debugger {
-        // TODO (milestone 3): initialize the DwarfData
+        let debug_data = match DwarfData::from_file(target) {
+            Ok(val) => val,
+            Err(DwarfError::ErrorOpeningFile) => {
+                println!("Could not open file {}", target);
+                std::process::exit(1);
+            }
+            Err(DwarfError::DwarfFormatError(err)) => {
+                println!("Could not debugging symbols from {}: {:?}", target, err);
+                std::process::exit(1);
+            }
+        };
 
         let history_path = format!("{}/.deet_history", std::env::var("HOME").unwrap());
         let mut readline = Editor::<()>::new();
@@ -25,6 +37,7 @@ impl Debugger {
             history_path,
             readline,
             inferior: None,
+            debug_data,
         }
     }
 
@@ -74,7 +87,7 @@ impl Debugger {
                     // the inferior is initially at the stopped state because of SIGTRAP.
                     if let Some(inferior) = Inferior::new(&self.target, &args) {
                         self.inferior = Some(inferior);
-                        // continue running the inferior.
+                        // resume the inferior.
                         self.cont_inferior();
                     } else {
                         println!("Error starting subprocess");
@@ -86,6 +99,15 @@ impl Debugger {
                         return;
                     }
                     self.cont_inferior();
+                }
+                DebuggerCommand::Back => {
+                    if self.inferior.is_none() {
+                        println!("Error no inferior");
+                        return;
+                    }
+                    if let Err(_) = self.inferior.as_ref().unwrap().print_backtrace(&self.debug_data) {
+                        println!("Error print backtrace");
+                    }
                 }
                 DebuggerCommand::Quit => {
                     if self.inferior.is_some() {

@@ -1,3 +1,4 @@
+use crate::dwarf_data::DwarfData;
 use nix::sys::ptrace;
 use nix::sys::signal;
 use nix::sys::signal::Signal;
@@ -37,10 +38,6 @@ impl Inferior {
     /// Attempts to start a new inferior process. Returns Some(Inferior) if successful, or None if
     /// an error is encountered.
     pub fn new(target: &str, args: &Vec<String>) -> Option<Inferior> {
-        if args.len() < 1 {
-            return None;
-        }
-
         // create a new cmd for launching the target program.
         let mut cmd = Command::new(target);
 
@@ -58,7 +55,7 @@ impl Inferior {
             .args(args)
             .spawn()
             .expect(&format!("failed to spawn {}", target));
-        
+
         let inf = Inferior { child };
         let res = inf.wait(Some(WaitPidFlag::WUNTRACED));
         // ensure the child process is paused/stopped by the SIGTRAP signal.
@@ -91,6 +88,40 @@ impl Inferior {
             return self.wait(None);
         }
         Err(nix::Error::from_errno(nix::errno::Errno::EIO))
+    }
+
+    pub fn print_backtrace(&self, debug_data: &DwarfData) -> Result<(), nix::Error> {
+        let regs = ptrace::getregs(self.pid())?;
+        let mut instruction_ptr = regs.rip as usize;
+        let mut base_ptr = regs.rbp as usize;
+        loop {
+            // print current stack frame.
+            let line = debug_data.get_line_from_addr(instruction_ptr);
+            let func_name = debug_data.get_function_from_addr(instruction_ptr);
+            if line.is_some() && func_name.is_some() {
+                println!(
+                    "{} ({}:{})",
+                    func_name.as_ref().unwrap(),
+                    line.as_ref().unwrap().file,
+                    line.as_ref().unwrap().number
+                );
+
+                // if reaches the entry function main, stop backtracing.
+                if func_name.as_ref().unwrap() == "main" {
+                    break;
+                }
+            } else {
+                // FIXME: what error to return?
+                return Err(nix::Error::from_errno(nix::errno::Errno::EINVAL));
+            }
+
+            // proceed to the last stack frame.
+            instruction_ptr =
+                ptrace::read(self.pid(), (base_ptr + 8) as ptrace::AddressType)? as usize;
+            base_ptr = ptrace::read(self.pid(), base_ptr as ptrace::AddressType)? as usize;
+        }
+
+        Ok(())
     }
 
     /// Returns the pid of this inferior.
