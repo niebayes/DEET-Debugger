@@ -5,7 +5,6 @@ use nix::sys::signal;
 use nix::sys::signal::Signal;
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
-use std::collections::HashMap;
 use std::mem::size_of;
 use std::os::unix::process::CommandExt;
 use std::process::Child;
@@ -49,11 +48,7 @@ pub struct Inferior {
 impl Inferior {
     /// Attempts to start a new inferior process. Returns Some(Inferior) if successful, or None if
     /// an error is encountered.
-    pub fn new(
-        target: &str,
-        args: &Vec<String>,
-        breakpoints: &mut HashMap<usize, Breakpoint>,
-    ) -> Option<Inferior> {
+    pub fn new(target: &str, args: &Vec<String>) -> Option<Inferior> {
         // create a new cmd for launching the target program.
         let mut cmd = Command::new(target);
 
@@ -72,7 +67,7 @@ impl Inferior {
             .spawn()
             .expect(&format!("failed to spawn {}", target));
 
-        let mut inf = Inferior { child };
+        let inf = Inferior { child };
         let res = inf.wait(Some(WaitPidFlag::WUNTRACED));
         // ensure the child process is paused/stopped by the SIGTRAP signal.
         match res {
@@ -84,15 +79,6 @@ impl Inferior {
             _ => {
                 println!("shall stopped on SIGTRAP");
                 return None;
-            }
-        }
-
-        // install all breakpoints.
-        for bp in breakpoints.values_mut() {
-            if let Ok(orig_byte) = inf.write_byte(bp.addr, 0xcc) {
-                bp.orig_byte = orig_byte;
-            } else {
-                println!("Error install breakpoint {} at {:#x}", bp.num, bp.addr);
             }
         }
 
@@ -181,5 +167,14 @@ impl Inferior {
             updated_word as *mut std::ffi::c_void,
         )?;
         Ok(orig_byte as u8)
+    }
+
+    pub fn install_breakpoint(&mut self, bp: &mut Breakpoint) {
+        if let Ok(orig_byte) = self.write_byte(bp.addr, 0xcc) {
+            bp.orig_byte = orig_byte;
+            println!("Set breakpoint {} at {:#x}", bp.num, bp.addr);
+        } else {
+            println!("Failed to set breakpoint {} at {:#x}", bp.num, bp.addr);
+        }
     }
 }

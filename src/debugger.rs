@@ -124,10 +124,12 @@ impl Debugger {
 
                     // create a new inferior.
                     // the inferior is initially at the stopped state because of SIGTRAP.
-                    if let Some(inferior) =
-                        Inferior::new(&self.target, &args, &mut self.breakpoints)
-                    {
+                    if let Some(inferior) = Inferior::new(&self.target, &args) {
                         self.inferior = Some(inferior);
+                        // install all breakpoints.
+                        for bp in self.breakpoints.values_mut() {
+                            self.inferior.as_mut().unwrap().install_breakpoint(bp);
+                        }
                         // resume the inferior.
                         self.cont_inferior();
                     } else {
@@ -167,16 +169,21 @@ impl Debugger {
                                 return;
                             }
 
-                            // set a new breakpoint at this address.
-                            self.breakpoints.insert(
+                            // create a new breakpoint.
+                            let mut bp = Breakpoint {
+                                num: self.next_bp_num,
                                 addr,
-                                Breakpoint {
-                                    num: self.next_bp_num,
-                                    addr,
-                                    orig_byte: 0,
-                                },
-                            );
-                            println!("Set breakpoint {} at {:#x}", self.next_bp_num, addr);
+                                orig_byte: 0,
+                            };
+
+                            // install this breakpoint immediately if the inferior is running.
+                            if self.inferior.is_some() {
+                                self.inferior.as_mut().unwrap().install_breakpoint(&mut bp);
+                            }
+
+                            // record this breakpoint for later usage, aka. to install it upon the
+                            // start of the inferior.
+                            self.breakpoints.insert(addr, bp);
                             self.next_bp_num += 1;
                         } else {
                             println!("Error parse breakpoint address");
