@@ -231,19 +231,19 @@ impl Debugger {
                         // resume the inferior.
                         self.cont_inferior();
                     } else {
-                        println!("Error starting subprocess");
+                        println!("Error: failed to start inferior");
                     }
                 }
                 DebuggerCommand::Cont => {
                     if self.inferior.is_none() {
-                        println!("Error no inferior");
+                        println!("Error: no inferior");
                         return;
                     }
                     self.cont_inferior();
                 }
                 DebuggerCommand::Back => {
                     if self.inferior.is_none() {
-                        println!("Error no inferior");
+                        println!("Error: no inferior");
                         return;
                     }
                     if let Err(_) = self
@@ -252,7 +252,7 @@ impl Debugger {
                         .unwrap()
                         .print_backtrace(&self.debug_data)
                     {
-                        println!("Error print backtrace");
+                        println!("Error: failed to print backtrace");
                     }
                 }
                 DebuggerCommand::Break(arg) => {
@@ -265,11 +265,11 @@ impl Debugger {
                             // validate address.
                             // the address is valid if it corresponds a valid line number.
                             if self.debug_data.get_line_from_addr(raw_addr).is_none() {
-                                println!("Error invalid breakpoint address");
+                                println!("Error: invalid breakpoint address");
                             }
                             addr = raw_addr;
                         } else {
-                            println!("Error parsing breakpoint address");
+                            println!("Error: failed to parse breakpoint address");
                             return;
                         }
                     } else if let Ok(line_number) = arg.parse::<usize>() {
@@ -277,14 +277,14 @@ impl Debugger {
                         {
                             addr = raw_addr;
                         } else {
-                            println!("Error invalid breakpoint line number");
+                            println!("Error: invalid breakpoint line number");
                             return;
                         }
                     } else if let Some(raw_addr) = self.debug_data.get_addr_for_function(None, &arg)
                     {
                         addr = raw_addr;
                     } else {
-                        println!("Error invalid breakpoint argument");
+                        println!("Error: invalid breakpoint argument");
                         return;
                     }
 
@@ -296,6 +296,28 @@ impl Debugger {
 
                     self.new_breakpoint(addr);
                 }
+                DebuggerCommand::Delete(arg) => {
+                    if let Ok(bp_num) = arg.parse::<usize>() {
+                        let mut exist = false;
+                        for (&addr, bp) in self.breakpoints.iter() {
+                            if bp.num == bp_num {
+                                // delete the breakpoint with number bp_num.
+                                self.delete_breakpoint(addr);
+                                exist = true;
+                                break;
+                            }
+                        }
+                        if !exist {
+                            println!("Error: no breakpoint with number {}", bp_num);
+                            return;
+                        }
+                    } else {
+                        println!("Error: failed to parse breakpoint number");
+                    }
+                }
+                DebuggerCommand::Next => {}
+                DebuggerCommand::Step => {}
+                DebuggerCommand::Print(arg) => {}
                 DebuggerCommand::Quit => {
                     if self.inferior.is_some() {
                         self.kill_inferior();
@@ -328,6 +350,17 @@ impl Debugger {
         // start of the inferior.
         self.breakpoints.insert(addr, bp);
         self.next_bp_num += 1;
+    }
+
+    // delete the breakpoint at address addr.
+    fn delete_breakpoint(&mut self, addr: usize) {
+        // remove the breakpoint record.
+        if let Some(bp) = self.breakpoints.remove(&addr) {
+            // restore the original byte at address addr.
+            self.inferior.as_mut().unwrap().restore_orig_byte(&bp);
+        } else {
+            println!("Error: failed to delete breakpoint at address {:#x}", addr);
+        }
     }
 
     /// This function prompts the user to enter a command, and continues re-prompting until the user
