@@ -7,6 +7,8 @@ use nix::sys::ptrace;
 use nix::sys::signal::Signal;
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
+use std::fs::File;
+use std::io::{self, BufRead}; // self = std::io.
 
 #[derive(Clone)]
 pub struct Breakpoint {
@@ -16,10 +18,14 @@ pub struct Breakpoint {
 }
 
 pub struct Debugger {
-    target: String,
-    history_path: String,
+    target: String,       // the path of the target program to be debugged.
+    history_path: String, // the path to store history entries, i.e. commands you have typed into the debugger.
     readline: Editor<()>,
+    // an inferior wraps a process being traced by the debugger.
+    // it acts like an interface for the debugger to manipulate the tracee.
     inferior: Option<Inferior>,
+    // contains debugging symbols (e.g. line numbers, variable names, function names),
+    // and utility functions to extract these symbols.
     debug_data: DwarfData,
     breakpoints: HashMap<usize, Breakpoint>, // key: addr, val: breakpoint.
     next_bp_num: usize,                      // next breakpoint number.
@@ -32,6 +38,27 @@ fn parse_address(addr: &str) -> Option<usize> {
         &addr
     };
     usize::from_str_radix(addr_without_0x, 16).ok()
+}
+
+fn print_source_line(file_path: &str, line_number: usize) {
+    // open the file.
+    let file = File::open(file_path).expect("error open file");
+    // note, to use lines(), you need to import BufRead trait.
+    let lines = io::BufReader::new(file).lines();
+    // print the line_number-th line in the file.
+    let mut i = 1; // line numbers start from 1.
+    for line in lines {
+        if let Ok(line) = line {
+            if i == line_number {
+                println!("Source: {}", line);
+            }
+        } else {
+            println!("Error reading line");
+            break;
+        }
+        i += 1;
+    }
+    // the file is dropped/closed when out of scope.
 }
 
 impl Debugger {
@@ -147,10 +174,15 @@ impl Debugger {
                 let func_name = self.debug_data.get_function_from_addr(regs.rip as usize);
                 if line.is_some() && func_name.is_some() {
                     println!(
-                        "Stopped at {} ({}:{})",
-                        func_name.as_ref().unwrap(),
+                        "Stopped at ({}:{}) in {}",
                         line.as_ref().unwrap().file,
-                        line.as_ref().unwrap().number
+                        line.as_ref().unwrap().number,
+                        func_name.as_ref().unwrap()
+                    );
+                    // print the source code corresponding to current line.
+                    print_source_line(
+                        line.as_ref().unwrap().file.as_str(),
+                        line.as_ref().unwrap().number,
                     );
                 }
             }
