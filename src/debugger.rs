@@ -224,41 +224,45 @@ impl Debugger {
                     }
                 }
                 DebuggerCommand::Break(arg) => {
+                    // parse the arg to get the addr
+                    // valid arg includes *addr, func_name, line_number.
+                    let addr;
                     if arg.starts_with('*') {
                         // the arg is an address.
-                        if let Some(addr) = parse_address(&arg[1..]) {
-                            // FIXME: validate address.
-
-                            // check if there exists a breakpoint.
-                            if let Some(bp) = self.breakpoints.get(&addr) {
-                                println!("{:#x} has an existing breakpoint {}", addr, bp.num);
-                                return;
+                        if let Some(raw_addr) = parse_address(&arg[1..]) {
+                            // validate address.
+                            // the address is valid if it corresponds a valid line number.
+                            if self.debug_data.get_line_from_addr(raw_addr).is_none() {
+                                println!("Error invalid breakpoint address");
                             }
-
-                            // create a new breakpoint.
-                            let mut bp = Breakpoint {
-                                num: self.next_bp_num,
-                                addr,
-                                orig_byte: 0,
-                            };
-
-                            // set breakpoint is just a writing a record.
-                            // the breakpoint may not be installed immediately.
-                            println!("Set breakpoint {} at {:#x}", bp.num, bp.addr);
-
-                            // install this breakpoint immediately if the inferior is running.
-                            if self.inferior.is_some() {
-                                self.inferior.as_mut().unwrap().install_breakpoint(&mut bp);
-                            }
-
-                            // record this breakpoint for later usage, aka. to install it upon the
-                            // start of the inferior.
-                            self.breakpoints.insert(addr, bp);
-                            self.next_bp_num += 1;
+                            addr = raw_addr;
                         } else {
-                            println!("Error parse breakpoint address");
+                            println!("Error parsing breakpoint address");
+                            return;
                         }
+                    } else if let Ok(line_number) = arg.parse::<usize>() {
+                        if let Some(raw_addr) = self.debug_data.get_addr_for_line(None, line_number)
+                        {
+                            addr = raw_addr;
+                        } else {
+                            println!("Error invalid breakpoint line number");
+                            return;
+                        }
+                    } else if let Some(raw_addr) = self.debug_data.get_addr_for_function(None, &arg)
+                    {
+                        addr = raw_addr;
+                    } else {
+                        println!("Error invalid breakpoint argument");
+                        return;
                     }
+
+                    // check if there exists a breakpoint.
+                    if let Some(bp) = self.breakpoints.get(&addr) {
+                        println!("{:#x} has an existing breakpoint {}", addr, bp.num);
+                        return;
+                    }
+
+                    self.new_breakpoint(addr);
                 }
                 DebuggerCommand::Quit => {
                     if self.inferior.is_some() {
@@ -268,6 +272,30 @@ impl Debugger {
                 }
             }
         }
+    }
+
+    // set a new breakpoint at addr and maybe install it.
+    fn new_breakpoint(&mut self, addr: usize) {
+        // create a new breakpoint.
+        let mut bp = Breakpoint {
+            num: self.next_bp_num,
+            addr,
+            orig_byte: 0,
+        };
+
+        // set breakpoint is just a writing a record.
+        // the breakpoint may not be installed immediately.
+        println!("Set breakpoint {} at {:#x}", bp.num, bp.addr);
+
+        // install this breakpoint immediately if the inferior is running.
+        if self.inferior.is_some() {
+            self.inferior.as_mut().unwrap().install_breakpoint(&mut bp);
+        }
+
+        // record this breakpoint for later usage, aka. to install it upon the
+        // start of the inferior.
+        self.breakpoints.insert(addr, bp);
+        self.next_bp_num += 1;
     }
 
     /// This function prompts the user to enter a command, and continues re-prompting until the user
