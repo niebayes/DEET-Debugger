@@ -4,6 +4,7 @@ use crate::debugger_command::DebuggerCommand;
 use crate::dwarf_data::{DwarfData, Error as DwarfError};
 use crate::inferior::{Inferior, Status};
 use nix::sys::ptrace;
+use nix::sys::signal::Signal;
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
 
@@ -66,26 +67,91 @@ impl Debugger {
         }
     }
 
+    // when this function is called, the inferior must be the stopped state.
     pub fn cont_inferior(&mut self) {
-        // run the inferior.
-        let res = self.inferior.as_mut().unwrap().cont();
         let pid = self.inferior.as_ref().unwrap().pid();
+        let regs = ptrace::getregs(pid).expect("error getregs");
+        // the address one byte before the instruction pointer.
+        let addr = regs.rip as usize - 1;
+
+        if let Some(bp) = self.breakpoints.get_mut(&addr) {
+            // when the inferior is previously stopped due to a breakpoint,
+            // the resuming procedure consists of two phases:
+            // (1) step the inferior one instruction forward and then make it stop by sending it a SIGTRAP signal.
+            // (2) if the inferior does not exit, resume the inferior.
+
+            // note, if enter this branch, the original byte replaced by this breakpoint
+            // must have already been restored.
+            // so we can safely step the inferior.
+
+            // the inferior will execute one instruction and then interrupted by the SIGTRAP signal.
+            ptrace::step(pid, Signal::SIGTRAP).expect("error step");
+            // wait for the inferior to stop.
+            let res = self.inferior.as_mut().unwrap().wait(None);
+            match res {
+                Ok(Status::Stopped(signal, _)) => {
+                    if signal == Signal::SIGTRAP {
+                        // reinstall the breakpoint.
+                        self.inferior.as_mut().unwrap().install_breakpoint(bp);
+                    } else {
+                        println!(
+                            "Error inferiror stepped but interrupted by signal {}",
+                            signal
+                        );
+                        return;
+                    }
+                }
+                Ok(Status::Exited(_)) => {
+                    drop(self.inferior.as_mut().unwrap());
+                    self.inferior = None;
+                    println!("Child exited (status 0)");
+                    return;
+                }
+                _ => {
+                    println!("process {} encounters error on cont", pid);
+                    return;
+                }
+            }
+        }
+
+        // resume the inferior process.
+        // cont() is returned when the wait syscall captures the stopped or exited inferior.
+        let res = self.inferior.as_mut().unwrap().cont();
         match res {
-            Ok(Status::Stopped(signal, _)) => {
+            Ok(Status::Stopped(signal, instruction_ptr)) => {
+                // the instruction pointer register, aka. program counter, holds the
+                // address of the next instruction to be executed.
+                // when we hit a breakpoint, i.e. the CPU executes the 0xcc instruction,
+                // the instruction pointer will hold the address of the instruction
+                // immediately next to the 0xcc instruction.
+                // so, to get the address of the breakpoint, we need to offset this address
+                // by -1 byte.
+                let addr = instruction_ptr - 1;
+                if let Some(bp) = self.breakpoints.get(&addr) {
+                    println!("Hit breakpoint {} at {:#x}", bp.num, addr);
+
+                    // restore the original byte replaced by "0xcc".
+                    self.inferior.as_mut().unwrap().restore_orig_byte(bp);
+                    // rewind/backoff the instruction pointer, i.e. make it holds the address of the
+                    // restored original byte, which one byte before the current instruction pointer, aka. rip.
+                    let mut regs = ptrace::getregs(pid).expect("error getregs");
+                    regs.rip -= 1;
+                    ptrace::setregs(pid, regs).expect("error setregs");
+                }
+
                 println!("Child stopped (signal {:?})", signal);
 
-                if let Ok(regs) = ptrace::getregs(pid) {
-                    // print current stack frame.
-                    let line = self.debug_data.get_line_from_addr(regs.rip as usize);
-                    let func_name = self.debug_data.get_function_from_addr(regs.rip as usize);
-                    if line.is_some() && func_name.is_some() {
-                        println!(
-                            "Stopped at {} ({}:{})",
-                            func_name.as_ref().unwrap(),
-                            line.as_ref().unwrap().file,
-                            line.as_ref().unwrap().number
-                        );
-                    }
+                // print current stack frame.
+                let regs = ptrace::getregs(pid).expect("error getregs");
+                let line = self.debug_data.get_line_from_addr(regs.rip as usize);
+                let func_name = self.debug_data.get_function_from_addr(regs.rip as usize);
+                if line.is_some() && func_name.is_some() {
+                    println!(
+                        "Stopped at {} ({}:{})",
+                        func_name.as_ref().unwrap(),
+                        line.as_ref().unwrap().file,
+                        line.as_ref().unwrap().number
+                    );
                 }
             }
             Ok(Status::Exited(_)) => {
@@ -175,6 +241,10 @@ impl Debugger {
                                 addr,
                                 orig_byte: 0,
                             };
+
+                            // set breakpoint is just a writing a record.
+                            // the breakpoint may not be installed immediately.
+                            println!("Set breakpoint {} at {:#x}", bp.num, bp.addr);
 
                             // install this breakpoint immediately if the inferior is running.
                             if self.inferior.is_some() {

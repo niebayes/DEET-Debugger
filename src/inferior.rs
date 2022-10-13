@@ -68,6 +68,7 @@ impl Inferior {
             .expect(&format!("failed to spawn {}", target));
 
         let inf = Inferior { child };
+        // FIXME: Shall I use WUNTRACED option?
         let res = inf.wait(Some(WaitPidFlag::WUNTRACED));
         // ensure the child process is paused/stopped by the SIGTRAP signal.
         match res {
@@ -171,10 +172,23 @@ impl Inferior {
 
     pub fn install_breakpoint(&mut self, bp: &mut Breakpoint) {
         if let Ok(orig_byte) = self.write_byte(bp.addr, 0xcc) {
-            bp.orig_byte = orig_byte;
-            println!("Set breakpoint {} at {:#x}", bp.num, bp.addr);
+            if bp.orig_byte == 0 {
+                // it's the first time to install this breakpoint.
+                bp.orig_byte = orig_byte;
+            }
         } else {
-            println!("Failed to set breakpoint {} at {:#x}", bp.num, bp.addr);
+            println!("Failed to install breakpoint {} at {:#x}", bp.num, bp.addr);
+        }
+    }
+
+    pub fn restore_orig_byte(&mut self, bp: &Breakpoint) {
+        if let Ok(byte) = self.write_byte(bp.addr, bp.orig_byte) {
+            assert_eq!(byte, 0xcc);
+        } else {
+            println!(
+                "Failed to restore original byte {} for breakpoint {} at {:#x}",
+                bp.orig_byte, bp.num, bp.addr
+            );
         }
     }
 }
