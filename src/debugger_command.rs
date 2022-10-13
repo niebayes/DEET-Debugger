@@ -3,6 +3,7 @@ pub enum DebuggerCommand {
     Run(Vec<String>),
     Cont,
     Back,
+    Break(String),
 }
 
 impl DebuggerCommand {
@@ -18,8 +19,16 @@ impl DebuggerCommand {
             "c" | "cont" | "continue" => {
                 Some(DebuggerCommand::Cont)
             }
-            "b" | "back" | "backtrace" => {
+            "back" | "backtrace" => {
                 Some(DebuggerCommand::Back)
+            }
+            "b" | "break" => {
+                if tokens.len() != 2 {
+                    println!("Usage: {} <*addr> | <func_name> | <line_number>", tokens[0]);
+                    None
+                } else {
+                    Some(DebuggerCommand::Break(tokens[1].to_string()))
+                }
             }
             // Default case:
             _ => None,

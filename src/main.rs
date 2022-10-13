@@ -8,6 +8,7 @@ use crate::debugger::Debugger;
 use nix::sys::signal::{signal, SigHandler, Signal};
 use std::env;
 
+// entry point to run the debugger.
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() != 2 {

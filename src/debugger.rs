@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::debugger_command::DebuggerCommand;
 use crate::dwarf_data::{DwarfData, Error as DwarfError};
 use crate::inferior::{Inferior, Status};
@@ -5,12 +7,30 @@ use nix::sys::ptrace;
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
 
+#[derive(Clone)]
+pub struct Breakpoint {
+    pub num: usize,    // the number of this breakpoint.
+    pub addr: usize,   // the address where the breakpoint is set.
+    pub orig_byte: u8, // the original byte replaced by "0xcc".
+}
+
 pub struct Debugger {
     target: String,
     history_path: String,
     readline: Editor<()>,
     inferior: Option<Inferior>,
     debug_data: DwarfData,
+    breakpoints: HashMap<usize, Breakpoint>, // key: addr, val: breakpoint.
+    next_bp_num: usize,                      // next breakpoint number.
+}
+
+fn parse_address(addr: &str) -> Option<usize> {
+    let addr_without_0x = if addr.to_lowercase().starts_with("0x") {
+        &addr[2..]
+    } else {
+        &addr
+    };
+    usize::from_str_radix(addr_without_0x, 16).ok()
 }
 
 impl Debugger {
@@ -28,6 +48,8 @@ impl Debugger {
             }
         };
 
+        debug_data.print();
+
         let history_path = format!("{}/.deet_history", std::env::var("HOME").unwrap());
         let mut readline = Editor::<()>::new();
         // Attempt to load history from ~/.deet_history if it exists
@@ -39,6 +61,8 @@ impl Debugger {
             readline,
             inferior: None,
             debug_data,
+            breakpoints: HashMap::new(),
+            next_bp_num: 0,
         }
     }
 
@@ -100,7 +124,9 @@ impl Debugger {
 
                     // create a new inferior.
                     // the inferior is initially at the stopped state because of SIGTRAP.
-                    if let Some(inferior) = Inferior::new(&self.target, &args) {
+                    if let Some(inferior) =
+                        Inferior::new(&self.target, &args, &mut self.breakpoints)
+                    {
                         self.inferior = Some(inferior);
                         // resume the inferior.
                         self.cont_inferior();
@@ -127,6 +153,34 @@ impl Debugger {
                         .print_backtrace(&self.debug_data)
                     {
                         println!("Error print backtrace");
+                    }
+                }
+                DebuggerCommand::Break(arg) => {
+                    if arg.starts_with('*') {
+                        // the arg is an address.
+                        if let Some(addr) = parse_address(&arg[1..]) {
+                            // FIXME: validate address.
+
+                            // check if there exists a breakpoint.
+                            if let Some(bp) = self.breakpoints.get(&addr) {
+                                println!("{:#x} has an existing breakpoint {}", addr, bp.num);
+                                return;
+                            }
+
+                            // set a new breakpoint at this address.
+                            self.breakpoints.insert(
+                                addr,
+                                Breakpoint {
+                                    num: self.next_bp_num,
+                                    addr,
+                                    orig_byte: 0,
+                                },
+                            );
+                            println!("Set breakpoint {} at {:#x}", self.next_bp_num, addr);
+                            self.next_bp_num += 1;
+                        } else {
+                            println!("Error parse breakpoint address");
+                        }
                     }
                 }
                 DebuggerCommand::Quit => {

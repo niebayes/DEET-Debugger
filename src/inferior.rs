@@ -1,9 +1,12 @@
+use crate::debugger::Breakpoint;
 use crate::dwarf_data::DwarfData;
 use nix::sys::ptrace;
 use nix::sys::signal;
 use nix::sys::signal::Signal;
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
+use std::collections::HashMap;
+use std::mem::size_of;
 use std::os::unix::process::CommandExt;
 use std::process::Child;
 use std::process::Command;
@@ -30,14 +33,27 @@ fn child_traceme() -> Result<(), std::io::Error> {
     )))
 }
 
+fn align_addr_to_word(addr: usize) -> usize {
+    addr & (-(size_of::<usize>() as isize) as usize)
+}
+
 pub struct Inferior {
     child: Child,
 }
 
+// to debug a program, the debugger spawns an inferior process which further spawns a child process to
+// load and execute the target program to be debugged.
+// the inferior process acts like a container to wrap the process being debugged. It also acts like an
+// interface to bridge the debugger and the process being debugged. It presents many function handles
+// to be used by the debugger to manipulate the process being debugged.
 impl Inferior {
     /// Attempts to start a new inferior process. Returns Some(Inferior) if successful, or None if
     /// an error is encountered.
-    pub fn new(target: &str, args: &Vec<String>) -> Option<Inferior> {
+    pub fn new(
+        target: &str,
+        args: &Vec<String>,
+        breakpoints: &mut HashMap<usize, Breakpoint>,
+    ) -> Option<Inferior> {
         // create a new cmd for launching the target program.
         let mut cmd = Command::new(target);
 
@@ -56,7 +72,7 @@ impl Inferior {
             .spawn()
             .expect(&format!("failed to spawn {}", target));
 
-        let inf = Inferior { child };
+        let mut inf = Inferior { child };
         let res = inf.wait(Some(WaitPidFlag::WUNTRACED));
         // ensure the child process is paused/stopped by the SIGTRAP signal.
         match res {
@@ -68,6 +84,15 @@ impl Inferior {
             _ => {
                 println!("shall stopped on SIGTRAP");
                 return None;
+            }
+        }
+
+        // install all breakpoints.
+        for bp in breakpoints.values_mut() {
+            if let Ok(orig_byte) = inf.write_byte(bp.addr, 0xcc) {
+                bp.orig_byte = orig_byte;
+            } else {
+                println!("Error install breakpoint {} at {:#x}", bp.num, bp.addr);
             }
         }
 
@@ -141,5 +166,20 @@ impl Inferior {
             }
             other => panic!("waitpid returned unexpected status: {:?}", other),
         })
+    }
+
+    fn write_byte(&mut self, addr: usize, val: u8) -> Result<u8, nix::Error> {
+        let aligned_addr = align_addr_to_word(addr);
+        let byte_offset = addr - aligned_addr;
+        let word = ptrace::read(self.pid(), aligned_addr as ptrace::AddressType)? as u64;
+        let orig_byte = (word >> 8 * byte_offset) & 0xff;
+        let masked_word = word & !(0xff << 8 * byte_offset);
+        let updated_word = masked_word | ((val as u64) << 8 * byte_offset);
+        ptrace::write(
+            self.pid(),
+            aligned_addr as ptrace::AddressType,
+            updated_word as *mut std::ffi::c_void,
+        )?;
+        Ok(orig_byte as u8)
     }
 }
