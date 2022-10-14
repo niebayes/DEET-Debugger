@@ -490,14 +490,25 @@ impl Debugger {
         let var_val = self.collect_vars();
         if let Some(&var) = var_val.get(var_name) {
             if let Location::Address(addr) = var.location {
-                // TODO: implement this logic and test it.
                 let mut buf = Vec::new();
                 for i in 0..var.entity_type.size {
                     let word = ptrace::read(pid, (addr + i) as ptrace::AddressType).unwrap() as u8;
                     buf.push(word);
                 }
+                // TODO: implement words aggregation
+                // TODO: use bytemuck from_bytes to implement words aggregation.
+                // https://docs.rs/bytemuck/latest/bytemuck/fn.from_bytes.html
                 // aggregate all words in buf and cast it to a type with name var.entity_type.name.
                 // that's the value for the variable with name var_name, return it in the &str representation.
+
+                // gimli_wrapper.rs::DebugValue only offers these variable types.
+                match var.entity_type.name.as_str() {
+                    "String" => {},
+                    "u64" => {},
+                    "i64" => {}, 
+                    "usize" => {},
+                    _ => println!("Error: unknown variable type {}", var.entity_type.name.as_str()),
+                }
             }
         }
 
