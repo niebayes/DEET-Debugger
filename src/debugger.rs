@@ -41,7 +41,6 @@ fn parse_address(addr: &str) -> Option<usize> {
 }
 
 fn print_source_line(file_path: &str, line_number: usize) {
-    // open the file.
     let file = File::open(file_path).expect("error open file");
     // note, to use lines(), you need to import BufRead trait.
     let lines = io::BufReader::new(file).lines();
@@ -94,78 +93,74 @@ impl Debugger {
         }
     }
 
-    // when this function is called, the inferior must be the stopped state.
     pub fn cont_inferior(&mut self) {
+        // note, when this function is called, the inferior is guaranteed to be in the
+        // stopped state.
+        // there're two possible causes:
+        // (1) the inferior hits a breakpoint and stops after executing the 0xcc instruction.
+        //     Now, rip holds the address of the instruction next to the 0xcc instruction.
+        // (2) the inferior is signaled by, for e.g. SIGSTOP, issued from ctrl-c.
+        //     Now, rip holds the address of the instruction to be executed next.
+        // if it's the case (1), we need to restore the original byte replaced by the 0xcc instruction
+        // and rewind the rip by one byte, so that the inferior continues from the original byte.
+        // if otherwise it's the case (2), we simply resumes the inferior.
+        // however, since it's guaranteed to have restored the original byte each time we hitted a
+        // breakpoint, there's no need to take special handling for the case (1).
+        // in summary, this function takes these steps:
+        // (a) ptrace::step to step the inferior and wait.
+        // (b1) if the inferior terminates, return.
+        // (b2) if the address of the last executed instruction was set a breakpoint, reinstall the breakpoint.
+        // (c) inferior::cont to resume the inferior to normal execution and wait.
+        // (d1) if the inferior terminates, return.
+        // (d2) if the address of the last executed instruction was set a breakpoint, restore the original byte
+        //      and rewind rip by one byte.
+
+        // note, the step command will simply step the inferior by one instruction and reinstall the breakpoint if necessary.
+        // it won't restore the original byte. The same goes for the next command which steps the inferior in a loop until it hits a breakpoint or the line
+        // number changes. After its termination, the original byte is not restored however.
+        // in summary, inorder to cooperate with the next and step commands, this function needs the following
+        // modifications.
+        // (before-a) if the address of the instruction to be executed was set a breakpoint, restore the original byte.
+
         let pid = self.inferior.as_ref().unwrap().pid();
         let regs = ptrace::getregs(pid).expect("error getregs");
-        // the address one byte before the instruction pointer.
-        let addr = regs.rip as usize - 1;
+        let exec_addr = regs.rip as usize;
+        if let Some(bp) = self.breakpoints.get(&exec_addr) {
+            self.inferior.as_mut().unwrap().restore_orig_byte(bp);
+        }
 
-        // FIXME: this seems wrong. If we've been stopped by a breakpoint,
-        // regs.rip will hold the address of the restored original byte,
-        // which is also the address the breakpoint resides at.
-        // so we need to examine regs.rip instead of regs.rip - 1.
-        if let Some(bp) = self.breakpoints.get_mut(&addr) {
-            // when the inferior is previously stopped due to a breakpoint,
-            // the resuming procedure consists of two phases:
-            // (1) step the inferior one instruction forward and then make it stop by sending it a SIGTRAP signal.
-            // (2) if the inferior does not exit, resume the inferior.
-
-            // note, if enter this branch, the original byte replaced by this breakpoint
-            // must have already been restored.
-            // so we can safely step the inferior.
-
-            // the inferior will execute one instruction and then interrupted by the SIGTRAP signal.
-            ptrace::step(pid, Signal::SIGTRAP).expect("error step");
-            // wait for the inferior to stop.
-            let res = self.inferior.as_mut().unwrap().wait(None);
-            match res {
-                Ok(Status::Stopped(signal, _)) => {
-                    if signal == Signal::SIGTRAP {
-                        // reinstall the breakpoint.
-                        self.inferior.as_mut().unwrap().install_breakpoint(bp);
-                    } else {
-                        println!(
-                            "Error inferiror stepped but interrupted by signal {}",
-                            signal
-                        );
-                        return;
-                    }
-                }
-                Ok(Status::Exited(_)) => {
+        ptrace::step(pid, Signal::SIGTRAP).expect("error step");
+        match self.inferior.as_mut().unwrap().wait(None) {
+            Ok(Status::Stopped(signal, instruction_ptr)) => {
+                if signal != Signal::SIGTRAP {
+                    println!("Error: inferior stopped by unexpected signal {}", signal);
                     self.clean();
                     return;
                 }
-                _ => {
-                    println!("process {} encounters error on cont", pid);
-                    return;
+
+                let last_exec_addr = instruction_ptr - 1;
+                if let Some(bp) = self.breakpoints.get_mut(&last_exec_addr) {
+                    self.inferior.as_mut().unwrap().install_breakpoint(bp);
                 }
+            }
+            Ok(Status::Exited(status)) => {
+                println!("Child exited (status {})", status);
+                self.clean();
+                return;
+            }
+            _ => {
+                println!("Error: unexpected return status from wait");
+                self.clean();
+                return;
             }
         }
 
-        // resume the inferior process.
-        // cont() is returned when the wait syscall captures the stopped or exited inferior.
-        let res = self.inferior.as_mut().unwrap().cont();
-        match res {
+        match self.inferior.as_mut().unwrap().cont() {
             Ok(Status::Stopped(signal, instruction_ptr)) => {
-                // the instruction pointer register, aka. program counter, holds the
-                // address of the next instruction to be executed.
-                // when we hit a breakpoint, i.e. the CPU executes the 0xcc instruction,
-                // the instruction pointer will hold the address of the instruction
-                // immediately next to the 0xcc instruction.
-                // so, to get the address of the breakpoint, we need to offset this address
-                // by -1 byte.
-                let addr = instruction_ptr - 1;
-                if let Some(bp) = self.breakpoints.get(&addr) {
-                    println!("Hit breakpoint {} at {:#x}", bp.num, addr);
-
-                    // restore the original byte replaced by "0xcc".
+                let last_exec_addr = instruction_ptr - 1;
+                if let Some(bp) = self.breakpoints.get(&last_exec_addr) {
                     self.inferior.as_mut().unwrap().restore_orig_byte(bp);
-                    // rewind/backoff the instruction pointer, i.e. make it holds the address of the
-                    // restored original byte, which one byte before the current instruction pointer, aka. rip.
-                    let mut regs = ptrace::getregs(pid).expect("error getregs");
-                    regs.rip -= 1;
-                    ptrace::setregs(pid, regs).expect("error setregs");
+                    self.rewind_rip();
                 }
 
                 println!("Child stopped (signal {:?})", signal);
@@ -189,11 +184,12 @@ impl Debugger {
                     // );
                 }
             }
-            Ok(Status::Exited(_)) => {
+            Ok(Status::Exited(status)) => {
+                println!("Child exited (status {})", status);
                 self.clean();
             }
             _ => {
-                println!("process {} encounters error on cont", pid);
+                println!("Error: unexpected return status from wait");
             }
         }
     }
@@ -462,8 +458,17 @@ impl Debugger {
 
     // clean the inferior and remove all breakpoints.
     fn clean(&mut self) {
-        drop(self.inferior.as_mut().unwrap());
-        self.inferior = None;
+        if self.inferior.is_some() {
+            match self.inferior.as_mut().unwrap().wait(None) {
+                Ok(Status::Stopped(_, _)) => self.kill_inferior(),
+                _ => {}
+            }
+            // TODO: fix ugly code.
+            if self.inferior.is_some() {
+                drop(self.inferior.as_mut().unwrap());
+                self.inferior = None;
+            }
+        }
 
         self.breakpoints.clear();
         self.next_bp_num = 0;
