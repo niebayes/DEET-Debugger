@@ -45,6 +45,7 @@ pub struct Inferior {
 // the inferior process acts like a container to wrap the process being debugged. It also acts like an
 // interface to bridge the debugger and the process being debugged. It presents many function handles
 // to be used by the debugger to manipulate the process being debugged.
+// in summary, the debugger is the tracer and the inferior is the tracee.
 impl Inferior {
     /// Attempts to start a new inferior process. Returns Some(Inferior) if successful, or None if
     /// an error is encountered.
@@ -52,33 +53,26 @@ impl Inferior {
         // create a new cmd for launching the target program.
         let mut cmd = Command::new(target);
 
-        // before executing the target program, let the child process executes the child_traceme function.
         // when a process that has PTRACE_TRACEME enabled calls exec, the operating system will load
         // the specified program into the process, and then (before the new program starts running)
         // it will pause the process using SIGTRAP.
-        // SIGTRAP signal is used exclusively by debuggers.
         unsafe {
             cmd.pre_exec(child_traceme);
         }
 
         // spawn a child process to execute the target program.
-        let child = cmd
-            .args(args)
-            .spawn()
-            .expect(&format!("failed to spawn {}", target));
+        let child = cmd.args(args).spawn().ok()?;
 
         let inf = Inferior { child };
-        // FIXME: Shall I use WUNTRACED option?
-        let res = inf.wait(Some(WaitPidFlag::WUNTRACED));
-        // ensure the child process is paused/stopped by the SIGTRAP signal.
-        match res {
+        match inf.wait(None) {
+            // ensure the child process is paused/stopped by the SIGTRAP signal.
             Ok(Status::Stopped(signal, _)) => {
                 if signal != Signal::SIGTRAP {
                     return None;
                 }
             }
             _ => {
-                println!("shall stopped on SIGTRAP");
+                println!("Error: unexpected status returned from wait");
                 return None;
             }
         }
@@ -87,10 +81,7 @@ impl Inferior {
     }
 
     pub fn cont(&mut self) -> Result<Status, nix::Error> {
-        if let Err(_) = ptrace::cont(self.pid(), None) {
-            // FIXME: what nix::Error to return
-            return Err(nix::Error::from_errno(nix::errno::Errno::ESRCH));
-        }
+        ptrace::cont(self.pid(), None)?;
         self.wait(None)
     }
 

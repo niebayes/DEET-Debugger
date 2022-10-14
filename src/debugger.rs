@@ -161,8 +161,11 @@ impl Debugger {
                 println!("Child exited (status {})", status);
                 self.clean();
             }
+            Ok(Status::Signaled(signal)) => {
+                println!("Child signaled by {}", signal)
+            }
             _ => {
-                println!("Error: unexpected return status from wait");
+                panic!("Error: unexpected return status from wait");
             }
         }
     }
