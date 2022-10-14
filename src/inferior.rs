@@ -94,6 +94,30 @@ impl Inferior {
     }
 
     pub fn print_backtrace(&self, debug_data: &DwarfData) -> Result<(), nix::Error> {
+        // In order to be useful, a backtrace should show function names and line numbers
+        // so that a programmer can identify which parts of their program is running.
+        // This is called "source-level debugging".
+        // However, a running executable is comprised only of assembly instructions
+        // and has no awareness of function names or line numbers.
+        // In order to print such information, we need to read extra debugging symbols
+        // that are stored within an executable compiled specifically for debugging.
+        // This debugging information stores mappings between addresses and line numbers,
+        // functions, variables, and more. With this information, we can find
+        // where variables are stored in memory or figure out what line is being executed
+        // based on the value of the processor’s instruction pointer.
+        // On many platforms, debugging symbols are stored in a format called DWARF
+        // and embedded inside the executable file.
+
+        // The stack consists of stack frames, where each function’s local variables
+        // are placed in its own stack frame. At the top of each stack frame is a return address,
+        // which stores the address in the text segment where we should go to after returning
+        // from this function.
+        // When printing a backtrace, we do so using the return addresses.
+        // First, we print the line number corresponding to %rip (where we are currently executing).
+        // Then, we print the line number corresponding to the return address of our current stack frame.
+        // Then, we print the line number for the return address of the previous stack frame, and so on,
+        // until we reach the main function.
+
         let regs = ptrace::getregs(self.pid())?;
         let mut instruction_ptr = regs.rip as usize;
         let mut base_ptr = regs.rbp as usize;
@@ -135,6 +159,14 @@ impl Inferior {
     /// Calls waitpid on this inferior and returns a Status to indicate the state of the process
     /// after the waitpid call.
     pub fn wait(&self, options: Option<WaitPidFlag>) -> Result<Status, nix::Error> {
+        // Normally, SIGINT (triggered by Ctrl-C) will terminate a process,
+        // but if a process is being traced under ptrace, SIGINT will cause it
+        // to temporarily stop instead, as if it were sent SIGSTOP.
+        // the same is true for all signals that typically terminate a process.
+        // this is useful for debugging: if a program segfaults but is being traced
+        // under ptrace, the program will stop instead of terminating so that you
+        // can get a backtrace and inspect its memory.
+
         Ok(match waitpid(self.pid(), options)? {
             WaitStatus::Exited(_pid, exit_code) => Status::Exited(exit_code),
             WaitStatus::Signaled(_pid, signal, _core_dumped) => Status::Signaled(signal),
