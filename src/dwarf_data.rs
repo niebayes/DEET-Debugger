@@ -11,7 +11,7 @@ pub enum Error {
 }
 
 pub struct DwarfData {
-    files: Vec<File>,
+    pub files: Vec<File>,
     addr2line: Context<addr2line::gimli::EndianRcSlice<addr2line::gimli::RunTimeEndian>>,
 }
 

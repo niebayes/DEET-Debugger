@@ -177,7 +177,7 @@ impl Inferior {
                 bp.orig_byte = orig_byte;
             }
         } else {
-            println!("Failed to install breakpoint {} at {:#x}", bp.num, bp.addr);
+            panic!("Failed to install breakpoint {} at {:#x}", bp.num, bp.addr);
         }
     }
 

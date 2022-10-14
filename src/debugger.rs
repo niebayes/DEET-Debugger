@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::debugger_command::DebuggerCommand;
-use crate::dwarf_data::{DwarfData, Error as DwarfError};
+use crate::dwarf_data::{DwarfData, Error as DwarfError, Location, Variable};
 use crate::inferior::{Inferior, Status};
 use nix::sys::ptrace;
 use nix::sys::signal::Signal;
@@ -122,6 +122,7 @@ impl Debugger {
         // modifications.
         // (before-a) if the address of the instruction to be executed was set a breakpoint, restore the original byte.
 
+        // self.step() does the (before-a), (a), (b1), (b2) steps.
         if let Err(_) = self.step() {
             return;
         }
@@ -318,7 +319,21 @@ impl Debugger {
                     // (c2) if the the address of the last executed instruction was set a breakpoint, reinstall the breakpoint.
                     if let Err(_) = self.step() {}
                 }
-                DebuggerCommand::Print(arg) => {}
+                DebuggerCommand::Print(arg) => {
+                    println!("Error: not implemented");
+                    return;
+
+                    if self.inferior.is_none() {
+                        println!("Error: no inferior");
+                        return;
+                    }
+
+                    if let Some(val) = self.get_var(&arg) {
+                        println!("Variable {} = {}", &arg, val);
+                    } else {
+                        println!("Error: unknown variable name {}", &arg);
+                    }
+                }
                 DebuggerCommand::Quit => {
                     if self.inferior.is_some() {
                         self.kill_inferior();
@@ -393,6 +408,10 @@ impl Debugger {
                 self.clean();
                 Err(())
             }
+            Ok(Status::Signaled(signal)) => {
+                println!("signaled by signal {}", signal);
+                Ok(())
+            }
             _ => {
                 println!("Error: unexpected return status from wait");
                 self.clean();
@@ -437,6 +456,49 @@ impl Debugger {
         let mut regs = ptrace::getregs(pid).expect("error getregs");
         regs.rip -= 1;
         ptrace::setregs(pid, regs).expect("error setregs");
+    }
+
+    // FIXME: Shall I collect all vars upon start running an inferior?
+    // FIXME: Does the dwarf data change over time as the inferior makes progress?
+    // collect all variables from dwarf data
+    // into a hash map with keys variable names and values Variables.
+    fn collect_vars(&self) -> HashMap<&str, &Variable> {
+        let mut var_val = HashMap::new();
+        let files = &self.debug_data.files;
+        for file in files.iter() {
+            // collect global variables.
+            for var in file.global_variables.iter() {
+                var_val.insert(var.name.as_str(), var);
+            }
+            // collect local variables in each function.
+            // FIXME: Does dwarf data format distinguishes local variables from different functions?
+            for func in file.functions.iter() {
+                for var in func.variables.iter() {
+                    var_val.insert(var.name.as_str(), var);
+                }
+            }
+        }
+
+        var_val
+    }
+
+    fn get_var(&self, var_name: &str) -> Option<&str> {
+        let pid = self.inferior.as_ref().unwrap().pid();
+        let var_val = self.collect_vars();
+        if let Some(&var) = var_val.get(var_name) {
+            if let Location::Address(addr) = var.location {
+                // TODO: implement this logic and test it.
+                let mut buf = Vec::new();
+                for i in 0..var.entity_type.size {
+                    let word = ptrace::read(pid, (addr + i) as ptrace::AddressType).unwrap() as u8;
+                    buf.push(word);
+                }
+                // aggregate all words in buf and cast it to a type with name var.entity_type.name.
+                // that's the value for the variable with name var_name, return it in the &str representation.
+            }
+        }
+
+        None
     }
 
     /// This function prompts the user to enter a command, and continues re-prompting until the user
