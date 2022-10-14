@@ -108,10 +108,10 @@ impl Debugger {
         // breakpoint, there's no need to take special handling for the case (1).
         // in summary, this function takes these steps:
         // (a) ptrace::step to step the inferior and wait.
-        // (b1) if the inferior terminates, return.
+        // (b1) if the inferior terminates, clean and return.
         // (b2) if the address of the last executed instruction was set a breakpoint, reinstall the breakpoint.
         // (c) inferior::cont to resume the inferior to normal execution and wait.
-        // (d1) if the inferior terminates, return.
+        // (d1) if the inferior terminates, clean and return.
         // (d2) if the address of the last executed instruction was set a breakpoint, restore the original byte
         //      and rewind rip by one byte.
 
@@ -122,37 +122,8 @@ impl Debugger {
         // modifications.
         // (before-a) if the address of the instruction to be executed was set a breakpoint, restore the original byte.
 
-        let pid = self.inferior.as_ref().unwrap().pid();
-        let regs = ptrace::getregs(pid).expect("error getregs");
-        let exec_addr = regs.rip as usize;
-        if let Some(bp) = self.breakpoints.get(&exec_addr) {
-            self.inferior.as_mut().unwrap().restore_orig_byte(bp);
-        }
-
-        ptrace::step(pid, Signal::SIGTRAP).expect("error step");
-        match self.inferior.as_mut().unwrap().wait(None) {
-            Ok(Status::Stopped(signal, instruction_ptr)) => {
-                if signal != Signal::SIGTRAP {
-                    println!("Error: inferior stopped by unexpected signal {}", signal);
-                    self.clean();
-                    return;
-                }
-
-                let last_exec_addr = instruction_ptr - 1;
-                if let Some(bp) = self.breakpoints.get_mut(&last_exec_addr) {
-                    self.inferior.as_mut().unwrap().install_breakpoint(bp);
-                }
-            }
-            Ok(Status::Exited(status)) => {
-                println!("Child exited (status {})", status);
-                self.clean();
-                return;
-            }
-            _ => {
-                println!("Error: unexpected return status from wait");
-                self.clean();
-                return;
-            }
+        if let Err(_) = self.step() {
+            return;
         }
 
         match self.inferior.as_mut().unwrap().cont() {
@@ -166,6 +137,7 @@ impl Debugger {
                 println!("Child stopped (signal {:?})", signal);
 
                 // print current stack frame.
+                let pid = self.inferior.as_ref().unwrap().pid();
                 let regs = ptrace::getregs(pid).expect("error getregs");
                 let line = self.debug_data.get_line_from_addr(regs.rip as usize);
                 let func_name = self.debug_data.get_function_from_addr(regs.rip as usize);
@@ -313,103 +285,39 @@ impl Debugger {
                     }
                 }
                 DebuggerCommand::Next => {
-                    // this command only functions when the inferior is in the stopped state.
                     if self.inferior.is_none() {
                         println!("Error: no inferior");
                         return;
                     }
 
-                    // note, this command resumes the execution of the inferior until it hits
-                    // a different line. We cannot simply set a breakpoint at the next line,
-                    // since, for e.g. we are in a loop, the next line in the source code may not
-                    // be the next line of execution.
-                    // therefore, we have to resume the execution step by step until the line number changes.
+                    // this command triggers the following procedures:
+                    // (a) record the line number of the instruction to be executed.
+                    // (b) repeatedly call self.step to step one instruction forward until we hit
+                    //     another line with a different line number.
+                    // note, hitting a breakpoint won't interfere this command.
+                    // if the inferior does not terminate, this command always step the
+                    // inferior one line further.
 
-                    let pid = self.inferior.as_ref().unwrap().pid();
-                    let regs = ptrace::getregs(pid).expect("error getregs");
-                    // note, instruction pointer register holds the address of the next instruction,
-                    // if the inferior is stopped by a breakpoint, then the next instruction is actually
-                    // the replaced original byte, so we have to calculate the line number from that byte.
-                    // if the inferior is stopped by, for e.g., ctrl-c, then we calculate the line number
-                    // from the next instruction whose address is stored in the instruction pointer.
-                    let mut addr = if self.breakpoints.contains_key(&(regs.rip as usize - 1)) {
-                        regs.rip as usize - 1;
-                    } else {
-                        regs.rip
-                    };
-                    // the line number of the line we're currently in.
-                    if let Some(line) = self.debug_data.get_line_from_addr(addr) {
-                        // loop until the the execution hits a different line.
-                        loop {
-                            // if stopped by a breakpoint, the original byte is guaranteed to be already restored,
-                            // so we can safely step the inferior.
-                            ptrace::step(pid, Signal::SIGTRAP).expect("error step");
-                            // wait for the inferior to stop.
-                            let res = self.inferior.as_mut().unwrap().wait(None);
-                            let mut hit_breakpoint = false;
-                            match res {
-                                Ok(Status::Stopped(signal, _)) => {
-                                    if signal == Signal::SIGTRAP {
-                                        // if a breakpoint was set at the address of the just stepped instruction,
-                                        // we need to reinstall it.
-                                        let regs = ptrace::getregs(pid).expect("error getregs");
-                                        if let Some(bp) =
-                                            self.breakpoints.get_mut(&(regs.rip as usize - 1))
-                                        {
-                                            // reinstall the breakpoint.
-                                            self.inferior.as_mut().unwrap().install_breakpoint(bp);
-                                        } else {
-                                            // check if we've hit a breakpoint.
-                                            if let Some(bp) = self.breakpoints.get(&(regs.rip)) {
-                                                println!(
-                                                    "Hit breakpoint {} at {:#x}",
-                                                    bp.num, bp.addr
-                                                );
-                                                hit_breakpoint = true;
-                                            }
-                                        }
-                                    } else {
-                                        println!(
-                                            "Error: inferiror stepped but interrupted by signal {}",
-                                            signal
-                                        );
-                                        return;
-                                    }
-                                }
-                                Ok(Status::Exited(_)) => {
-                                    self.clean();
-                                    println!("Child exited (status 0)");
-                                    return;
-                                }
-                                _ => {
-                                    println!("process {} encounters error on cont", pid);
-                                    return;
-                                }
-                            }
-
-                            // hitting a breakpoint also breaks the loop.
-                            if hit_breakpoint {
-                                break;
-                            }
-
-                            // check if the line number is changed.
-                            let regs = ptrace::getregs(pid).expect("error getregs");
-                            // if the next instruction is at a different line, break the loop.
-                            // note, cannot offset -1 since we need the address of the next instruction.
-                            addr = regs.rip;
-                            if let Some(curr_line) = self.debug_data.get_line_from_addr(addr) {
-                                if curr_line.number != line.number {
-                                    break;
-                                }
-                            } else {
-                                println!("Error: failed to get line from address {:#x}", addr);
-                            }
+                    let line_number = self.get_curr_line_number();
+                    while let Ok(_) = self.step() {
+                        if self.get_curr_line_number() != line_number {
+                            break;
                         }
-                    } else {
-                        println!("Error: failed to get line from address {:#x}", addr);
                     }
                 }
-                DebuggerCommand::Step => {}
+                DebuggerCommand::Step => {
+                    if self.inferior.is_none() {
+                        println!("Error: no inferior");
+                        return;
+                    }
+
+                    // this command triggers the following procedures:
+                    // (a) if the address of the instruction to be executed was set a breakpoint, restore the original byte.
+                    // (b) ptrace::step to step the inferior and wait.
+                    // (c1) if the inferior terminates, clean and return.
+                    // (c2) if the the address of the last executed instruction was set a breakpoint, reinstall the breakpoint.
+                    if let Err(_) = self.step() {}
+                }
                 DebuggerCommand::Print(arg) => {}
                 DebuggerCommand::Quit => {
                     if self.inferior.is_some() {
@@ -456,6 +364,53 @@ impl Debugger {
         }
     }
 
+    // step the inferior by one instruction and wait.
+    fn step(&mut self) -> Result<(), ()> {
+        let pid = self.inferior.as_ref().unwrap().pid();
+        let regs = ptrace::getregs(pid).expect("error getregs");
+        let exec_addr = regs.rip as usize;
+        if let Some(bp) = self.breakpoints.get(&exec_addr) {
+            self.inferior.as_mut().unwrap().restore_orig_byte(bp);
+        }
+
+        ptrace::step(pid, Signal::SIGTRAP).expect("error step");
+        match self.inferior.as_mut().unwrap().wait(None) {
+            Ok(Status::Stopped(signal, instruction_ptr)) => {
+                if signal != Signal::SIGTRAP {
+                    println!("Error: inferior stopped by unexpected signal {}", signal);
+                    self.clean();
+                    return Err(());
+                }
+
+                let last_exec_addr = instruction_ptr - 1;
+                if let Some(bp) = self.breakpoints.get_mut(&last_exec_addr) {
+                    self.inferior.as_mut().unwrap().install_breakpoint(bp);
+                }
+                Ok(())
+            }
+            Ok(Status::Exited(status)) => {
+                println!("Child exited (status {})", status);
+                self.clean();
+                Err(())
+            }
+            _ => {
+                println!("Error: unexpected return status from wait");
+                self.clean();
+                Err(())
+            }
+        }
+    }
+
+    fn get_curr_line_number(&self) -> usize {
+        let pid = self.inferior.as_ref().unwrap().pid();
+        let regs = ptrace::getregs(pid).expect("error getregs");
+        let exec_addr = regs.rip as usize - 1;
+        self.debug_data
+            .get_line_from_addr(exec_addr)
+            .expect("error get_line_from_addr")
+            .number
+    }
+
     // clean the inferior and remove all breakpoints.
     fn clean(&mut self) {
         if self.inferior.is_some() {
@@ -474,6 +429,7 @@ impl Debugger {
         self.next_bp_num = 0;
     }
 
+    // rewind the instruction pointer by one byte.
     fn rewind_rip(&mut self) {
         let pid = self.inferior.as_ref().unwrap().pid();
         // rewind/backoff the instruction pointer, i.e. make it holds the address of the
